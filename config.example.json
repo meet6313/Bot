@@ -1,0 +1,16 @@
+{
+  "mode": "paper",
+  "price_source": "coindcx",
+  "market": "BTCINR",
+  "fast": 9,
+  "slow": 21,
+  "candle_seconds": 300,
+  "poll_seconds": 5,
+  "size_pct": 50,
+  "stop_pct": 1.5,
+  "daily_loss_pct": 5,
+  "start_cash": 100000,
+  "max_order_inr": 500,
+  "host": "127.0.0.1",
+  "port": 8080
+}
