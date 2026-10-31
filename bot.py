@@ -116,6 +116,82 @@ def http_json(url, data=None, headers=None, timeout=10):
         return json.loads(r.read().decode())
 
 
+def claude_message(prompt, system=None, model=None, max_tokens=512):
+    """Send a prompt to Anthropic's Claude API.
+
+    Optional: set ANTHROPIC_API_KEY and optionally CLAUDE_MODEL in the environment.
+    Returns the text reply string or raises RuntimeError on failure.
+    """
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        raise RuntimeError("ANTHROPIC_API_KEY is not set")
+    model = model or os.environ.get("CLAUDE_MODEL", "claude-3-5-sonnet-20240620")
+    payload = {
+        "model": model,
+        "max_tokens": max_tokens,
+        "messages": [{"role": "user", "content": prompt}],
+    }
+    if system:
+        payload["system"] = system
+    data = json.dumps(payload, separators=(",", ":")).encode()
+    headers = {
+        "Content-Type": "application/json",
+        "x-api-key": api_key,
+        "anthropic-version": "2023-06-01",
+    }
+    try:
+        result = http_json("https://api.anthropic.com/v1/messages", data, headers, timeout=30)
+    except Exception as exc:
+        raise RuntimeError("Claude API request failed: %s" % exc) from exc
+    try:
+        blocks = result["content"]
+        text = "".join(part.get("text", "") for part in blocks if isinstance(part, dict))
+        if not text:
+            raise RuntimeError("Claude returned no content")
+        return text.strip()
+    except Exception as exc:
+        raise RuntimeError("Could not parse Claude response: %s" % exc) from exc
+
+
+def summarize_state(engine):
+    """Return a concise AI summary of the current bot state if Claude is configured."""
+    if not os.environ.get("ANTHROPIC_API_KEY"):
+        return "Claude is not configured. Set ANTHROPIC_API_KEY to enable AI analysis."
+    state = engine.snapshot()
+    safe_state = {
+        "mode": state["mode"],
+        "market": state["market"],
+        "running": state["running"],
+        "halted": state["halted"],
+        "halt_reason": state["halt_reason"],
+        "price": state["price"],
+        "equity": state["equity"],
+        "cash": state["cash"],
+        "qty": state["qty"],
+        "entry": state["entry"],
+        "candle_no": state["candle_no"],
+        "errors": state["errors"],
+        "stats": state["stats"],
+        "day": state["day"],
+        "params": state["params"],
+    }
+    prompt = (
+        "You are a careful crypto trading assistant. Read the current trading bot state below "
+        "and give a brief, useful assessment in 4-6 bullet points. Keep it practical, note any risk "
+        "or operational issues, and do not give direct financial advice.\n\n"
+        + json.dumps(safe_state, sort_keys=True, default=str)
+    )
+    system = os.environ.get(
+        "CLAUDE_SYSTEM_PROMPT",
+        "You are a concise and data-focused trading assistant. Explain what the bot is doing, "
+        "spot obvious operational issues, and stay brief.",
+    )
+    try:
+        return claude_message(prompt, system=system, max_tokens=300)
+    except Exception as exc:
+        return "Claude summary unavailable: %s" % exc
+
+
 # ---------------------------------------------------------------- price feeds
 
 class SimFeed:
@@ -519,6 +595,10 @@ def make_handler(engine, token):
                 if self._authed():
                     self._send(200, engine.snapshot())
                 return
+            if self.path == "/api/ai-summary":
+                if self._authed():
+                    self._send(200, {"summary": summarize_state(engine)})
+                return
             self._send(404, {"error": "not found"})
 
         def do_POST(self):
@@ -542,6 +622,8 @@ def make_handler(engine, token):
                     engine.kill()
                 elif self.path == "/api/params":
                     engine.set_params(body)
+                elif self.path == "/api/ai-summary":
+                    self._send(200, {"summary": summarize_state(engine)})
                 else:
                     return self._send(404, {"error": "not found"})
             except ValueError as e:
@@ -554,7 +636,7 @@ def make_handler(engine, token):
 def build_engine(cfg, state_path=None):
     if cfg["price_source"] == "sim":
         feed = SimFeed(cfg["sim_start_price"], cfg["sim_seed"],
-                       cfg["sim_shock_at_poll"], cfg["sim_shock_pct"])
+                      cfg["sim_shock_at_poll"], cfg["sim_shock_pct"])
     else:
         feed = CoinDCXFeed(cfg["market"])
     if cfg["mode"] == "live":
@@ -587,6 +669,8 @@ def main():
     srv = ThreadingHTTPServer((cfg["host"], cfg["port"]), make_handler(engine, token))
     print("%s mode, %s, prices from %s. Dashboard on http://%s:%d" % (
         cfg["mode"].upper(), cfg["market"], cfg["price_source"], cfg["host"], cfg["port"]))
+    if os.environ.get("ANTHROPIC_API_KEY"):
+        print("Claude AI summary enabled. Use /api/ai-summary with the dashboard token.")
     try:
         srv.serve_forever()
     except KeyboardInterrupt:
